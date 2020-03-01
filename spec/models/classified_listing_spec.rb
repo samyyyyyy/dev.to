@@ -1,9 +1,13 @@
 require "rails_helper"
 
 RSpec.describe ClassifiedListing, type: :model do
-  let(:classified_listing) { create(:classified_listing, user_id: user.id) }
-  let(:user) { create(:user) }
-  let(:organization) { create(:organization) }
+  let_it_be(:user) { create(:user) }
+  let_it_be(:organization) { create(:organization) }
+  let(:classified_listing) { create(:classified_listing, user: user) }
+
+  # TODO: Remove setting of default parser from a model's callback
+  # This may apply default parser on area that should not use it.
+  after { ActsAsTaggableOn.default_parser = ActsAsTaggableOn::DefaultParser }
 
   it { is_expected.to validate_presence_of(:title) }
   it { is_expected.to validate_presence_of(:body_markdown) }
@@ -65,6 +69,58 @@ RSpec.describe ClassifiedListing, type: :model do
 
       expect { classified_listing.destroy }.not_to change(Credit, :count)
       expect(credit.reload.purchase).to be_nil
+    end
+  end
+
+  describe "#index_to_elasticsearch" do
+    it "enqueues job to index classified_listing to elasticsearch" do
+      sidekiq_assert_enqueued_with(job: Search::IndexToElasticsearchWorker, args: [described_class.to_s, classified_listing.id]) do
+        classified_listing.index_to_elasticsearch
+      end
+    end
+  end
+
+  describe "#index_to_elasticsearch_inline" do
+    it "indexed classified_listing to elasticsearch inline" do
+      allow(Search::ClassifiedListing).to receive(:index)
+      classified_listing.index_to_elasticsearch_inline
+      expect(Search::ClassifiedListing).to have_received(:index).with(classified_listing.id, hash_including(:id, :body_markdown))
+    end
+  end
+
+  describe "#after_commit" do
+    it "on update enqueues worker to index tag to elasticsearch" do
+      classified_listing.save
+
+      sidekiq_assert_enqueued_with(job: Search::IndexToElasticsearchWorker, args: [described_class.to_s, classified_listing.id]) do
+        classified_listing.save
+      end
+    end
+
+    it "on destroy enqueues job to delete classified_listing from elasticsearch" do
+      classified_listing.save
+      sidekiq_assert_enqueued_with(job: Search::RemoveFromElasticsearchIndexWorker, args: [described_class::SEARCH_CLASS.to_s, classified_listing.id]) do
+        classified_listing.destroy
+      end
+    end
+  end
+
+  describe "#serialized_search_hash" do
+    it "creates a valid serialized hash to send to elasticsearch" do
+      # classified_listing_search is a copy_to field and will never be included
+      # in the searialized_search_hash, so we skip it
+      mapping_keys = Search::ClassifiedListing::MAPPINGS.dig(:properties).except(:classified_listing_search).keys
+      search_hash_keys = classified_listing.serialized_search_hash.symbolize_keys.keys
+
+      expect(search_hash_keys).to match_array(mapping_keys)
+    end
+  end
+
+  describe "#elasticsearch_doc" do
+    it "finds document in elasticsearch", elasticsearch: true do
+      allow(Search::ClassifiedListing).to receive(:find_document)
+      classified_listing.elasticsearch_doc
+      expect(Search::ClassifiedListing).to have_received(:find_document)
     end
   end
 end

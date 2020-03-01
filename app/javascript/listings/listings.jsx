@@ -1,5 +1,5 @@
 import { h, Component } from 'preact';
-import { SingleListing } from './singleListing';
+import SingleListing from './singleListing';
 
 function resizeMasonryItem(item) {
   /* Get the grid object, its row-gap, and the size of its implicit rows */
@@ -434,17 +434,22 @@ export class Listings extends Component {
               openedListing.user_id !== currentUserId ? (
                 <em>
                   Message must be relevant and on-topic with the listing. All
-                  private interactions
+                  {' '}
+                  private interactions 
+                  {' '}
                   <b>must</b>
-                  abide by the 
+                  {' '}
+                  abide by the
                   {' '}
                   <a href="/code-of-conduct">code of conduct</a>
                 </em>
               ) : (
                 <em>
-                  All private interactions
+                  All private interactions 
+                  {' '}
                   <b>must</b>
-                  abide by the 
+                  {' '}
+                  abide by the
                   {' '}
                   <a href="/code-of-conduct">code of conduct</a>
                 </em>

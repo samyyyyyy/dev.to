@@ -7,12 +7,17 @@ Rails.application.routes.draw do
 
   devise_for :users, controllers: {
     omniauth_callbacks: "omniauth_callbacks",
-    session: "sessions",
     registrations: "registrations"
   }
 
+  require "sidekiq/web"
   authenticated :user, ->(user) { user.tech_admin? } do
-    mount DelayedJobWeb, at: "/delayed_job"
+    Sidekiq::Web.set :session_secret, Rails.application.secrets[:secret_key_base]
+    Sidekiq::Web.set :sessions, Rails.application.config.session_options
+    Sidekiq::Web.class_eval do
+      use Rack::Protection, origin_whitelist: ["https://dev.to"] # resolve Rack Protection HttpOrigin
+    end
+    mount Sidekiq::Web => "/sidekiq"
   end
 
   devise_scope :user do
@@ -30,17 +35,19 @@ Rails.application.routes.draw do
   end
 
   namespace :internal do
+    get "/", to: redirect("/internal/articles")
+
     resources :articles, only: %i[index show update]
     resources :broadcasts, only: %i[index new create edit update]
     resources :buffer_updates, only: %i[create update]
     resources :classified_listings, only: %i[index edit update destroy]
     resources :comments, only: [:index]
-    resources :dogfood, only: [:index]
     resources :events, only: %i[index create update]
     resources :feedback_messages, only: %i[index show]
     resources :listings, only: %i[index edit update destroy], controller: "classified_listings"
     resources :pages, only: %i[index new create edit update destroy]
     resources :mods, only: %i[index update]
+    resources :permissions, only: %i[index]
     resources :podcasts, only: %i[index edit update destroy] do
       member do
         post :add_admin
@@ -68,6 +75,7 @@ Rails.application.routes.draw do
       end
     end
     resources :organization_memberships, only: %i[update destroy create]
+    resources :organizations, only: %i[index show]
     resources :welcome, only: %i[index create]
     resources :growth, only: %i[index]
     resources :tools, only: %i[index create] do
@@ -76,6 +84,15 @@ Rails.application.routes.draw do
       end
     end
     resources :webhook_endpoints, only: :index
+    resource :config
+    resources :badges, only: :index
+    post "badges/award_badges", to: "badges#award_badges"
+  end
+
+  namespace :stories, defaults: { format: "json" } do
+    resource :feed, only: [:show] do
+      get ":timeframe" => "feeds#show"
+    end
   end
 
   namespace :api, defaults: { format: "json" } do
@@ -106,10 +123,15 @@ Rails.application.routes.draw do
         end
       end
       resources :follows, only: [:create]
-      resources :github_repos, only: [:index] do
-        collection do
-          post "/update_or_create", to: "github_repos#update_or_create"
-        end
+      namespace :followers do
+        get :users
+        get :organizations
+      end
+      namespace :followings do
+        get :users
+        get :tags
+        get :organizations
+        get :podcasts
       end
       resources :webhooks, only: %i[index create show destroy]
 
@@ -127,12 +149,20 @@ Rails.application.routes.draw do
     resources :reads, only: [:create]
   end
 
+  namespace :incoming_webhooks do
+    get "/mailchimp/:secret/unsubscribe", to: "mailchimp_unsubscribes#index", as: :mailchimp_unsubscribe_check
+    post "/mailchimp/:secret/unsubscribe", to: "mailchimp_unsubscribes#create", as: :mailchimp_unsubscribe
+  end
+
   resources :messages, only: [:create]
   resources :chat_channels, only: %i[index show create update]
   resources :chat_channel_memberships, only: %i[create update destroy]
   resources :articles, only: %i[update create destroy]
   resources :article_mutes, only: %i[update]
-  resources :comments, only: %i[create update destroy]
+  resources :comments, only: %i[create update destroy] do
+    patch "/hide", to: "comments#hide"
+    patch "/unhide", to: "comments#unhide"
+  end
   resources :comment_mutes, only: %i[update]
   resources :users, only: [:update] do
     resource :twitch_stream_updates, only: %i[show create]
@@ -143,7 +173,6 @@ Rails.application.routes.draw do
   resources :organizations, only: %i[update create]
   resources :followed_articles, only: [:index]
   resources :follows, only: %i[show create update]
-  resources :giveaways, only: %i[new edit update]
   resources :image_uploads, only: [:create]
   resources :blocks
   resources :notifications, only: [:index]
@@ -151,7 +180,11 @@ Rails.application.routes.draw do
   resources :downloads, only: [:index]
   resources :stripe_active_cards, only: %i[create update destroy]
   resources :live_articles, only: [:index]
-  resources :github_repos, only: %i[create update]
+  resources :github_repos, only: %i[index create update] do
+    collection do
+      post "/update_or_create", to: "github_repos#update_or_create"
+    end
+  end
   resources :buffered_articles, only: [:index]
   resources :events, only: %i[index show]
   resources :additional_content_boxes, only: [:index]
@@ -161,7 +194,6 @@ Rails.application.routes.draw do
   resources :html_variants, only: %i[index new create show edit update]
   resources :html_variant_trials, only: [:create]
   resources :html_variant_successes, only: [:create]
-  resources :push_notification_subscriptions, only: [:create]
   resources :tag_adjustments, only: %i[create destroy]
   resources :rating_votes, only: [:create]
   resources :page_views, only: %i[create update]
@@ -178,11 +210,12 @@ Rails.application.routes.draw do
   resources :display_ad_events, only: [:create]
   resources :badges, only: [:index]
   resource :pro_membership, path: :pro, only: %i[show create update]
-  resources :user_blocks, param: :blocked_id, only: %i[show destroy] do
-    post ":blocked_id", on: :collection, to: "user_blocks#create"
-  end
+  resources :user_blocks, param: :blocked_id, only: %i[show create destroy]
+  resources :podcasts, only: %i[new create]
   resolve("ProMembership") { [:pro_membership] } # see https://guides.rubyonrails.org/routing.html#using-resolve
 
+  get "/search/tags" => "search#tags"
+  get "/search/chat_channels" => "search#chat_channels"
   get "/chat_channel_memberships/find_by_chat_channel_id" => "chat_channel_memberships#find_by_chat_channel_id"
   get "/listings/dashboard" => "classified_listings#dashboard"
   get "/listings/:category" => "classified_listings#index"
@@ -204,6 +237,8 @@ Rails.application.routes.draw do
   get "/connect/:slug" => "chat_channels#index"
   post "/chat_channels/create_chat" => "chat_channels#create_chat"
   post "/chat_channels/block_chat" => "chat_channels#block_chat"
+  delete "/messages/:id" => "messages#destroy"
+  patch "/messages/:id" => "messages#update"
   get "/live/:username" => "twitch_live_streams#show"
 
   post "/pusher/auth" => "pusher#auth"
@@ -216,33 +251,9 @@ Rails.application.routes.draw do
   get "/social_previews/comment/:id" => "social_previews#comment", :as => :comment_social_preview
 
   get "/async_info/base_data", controller: "async_info#base_data", defaults: { format: :json }
+  get "/async_info/shell_version", controller: "async_info#shell_version", defaults: { format: :json }
 
-  get "/hello-goodbye-to-the-go-go-go",
-      to: redirect("ben/hello-goodbye-to-the-go-go-go")
-  get "/dhh-on-the-future-of-rails",
-      to: redirect("ben/dhh-on-the-future-of-rails")
-  get "/christopher-chedeau-on-the-philosophies-of-react",
-      to: redirect("ben/christopher-chedeau-on-the-philosophies-of-react")
-  get "/javascript-fatigue-buzzword",
-      to: redirect("ben/javascript-fatigue-buzzword")
-  get "/chris-seaton-making-ruby-fast",
-      to: redirect("ben/chris-seaton-making-ruby-fast")
-  get "/communicating-intent-the-perpetually-misunderstood-ruby-bang",
-      to: redirect("tom/communicating-intent-the-perpetually-misunderstood-ruby-bang")
-  get "/quick-tip-grepping-rails-routes",
-      to: redirect("tom/quick-tip-grepping-rails-routes")
-  get "/use-cases-for-githubs-new-direct-upload-feature",
-      to: redirect("ben/use-cases-for-githubs-new-direct-upload-feature")
-  get "/this-blog-post-was-written-using-draft-js",
-      to: redirect("ben/this-blog-post-was-written-using-draft-js")
-  get "/the-future-of-software-development",
-      to: redirect("ben/the-future-of-software-development")
-  get "/the-zen-of-missing-out-on-the-next-great-programming-tool",
-      to: redirect("ben/the-zen-of-missing-out-on-the-next-great-programming-tool")
-  get "/the-joy-and-benefit-of-being-an-early-adopter-in-programming",
-      to: redirect("ben/the-joy-and-benefit-of-being-an-early-adopter-in-programming")
-  get "/watkinsmatthewp/every-developer-should-write-a-personal-automation-api",
-      to: redirect("anotherdevblog/every-developer-should-write-a-personal-automation-api")
+  get "/future", to: redirect("devteam/the-future-of-dev-160n")
 
   # Settings
   post "users/update_language_settings" => "users#update_language_settings"
@@ -253,7 +264,9 @@ Rails.application.routes.draw do
   post "users/remove_org_admin" => "users#remove_org_admin"
   post "users/remove_from_org" => "users#remove_from_org"
   delete "users/remove_association", to: "users#remove_association"
-  delete "users/destroy", to: "users#destroy"
+  post "users/request_destroy", to: "users#request_destroy", as: :user_request_destroy
+  get "users/confirm_destroy/:token", to: "users#confirm_destroy", as: :user_confirm_destroy
+  delete "users/full_delete", to: "users#full_delete", as: :user_full_delete
   post "organizations/generate_new_secret" => "organizations#generate_new_secret"
   post "users/api_secrets" => "api_secrets#create", :as => :users_api_secrets
   delete "users/api_secrets/:id" => "api_secrets#destroy", :as => :users_api_secret
@@ -263,6 +276,7 @@ Rails.application.routes.draw do
 
   # You can have the root of your site routed with "root
   get "/about" => "pages#about"
+  get "/robots.:format" => "pages#robots"
   get "/api", to: redirect("https://docs.dev.to/api")
   get "/privacy" => "pages#privacy"
   get "/terms" => "pages#terms"
@@ -294,9 +308,9 @@ Rails.application.routes.draw do
   post "articles/preview" => "articles#preview"
   post "comments/preview" => "comments#preview"
   get "/stories/warm_comments/:username/:slug" => "stories#warm_comments"
-  get "/freestickers" => "giveaways#new"
   get "/shop", to: redirect("https://shop.dev.to/")
   get "/mod" => "moderations#index", :as => :mod
+  get "/mod/:tag" => "moderations#index"
 
   post "/fallback_activity_recorder" => "ga_events#create"
 
@@ -316,11 +330,12 @@ Rails.application.routes.draw do
   get "/dashboard" => "dashboards#show"
   get "/dashboard/pro" => "dashboards#pro"
   get "dashboard/pro/org/:org_id" => "dashboards#pro"
-  get "dashboard/following" => "dashboards#following"
-  get "/dashboard/:which" => "dashboards#followers",
-      :constraints => {
-        which: /organization_user_followers|user_followers/
-      }
+  get "dashboard/following" => "dashboards#following_tags"
+  get "dashboard/following_tags" => "dashboards#following_tags"
+  get "dashboard/following_users" => "dashboards#following_users"
+  get "dashboard/following_organizations" => "dashboards#following_organizations"
+  get "dashboard/following_podcasts" => "dashboards#following_podcasts"
+  get "/dashboard/:which" => "dashboards#followers", :constraints => { which: /user_followers/ }
   get "/dashboard/:which/:org_id" => "dashboards#show",
       :constraints => {
         which: /organization/
@@ -335,6 +350,13 @@ Rails.application.routes.draw do
 
   get "/embed/:embeddable" => "liquid_embeds#show"
 
+  # serviceworkers
+  get "/serviceworker" => "service_worker#index"
+  get "/manifest" => "service_worker#manifest"
+
+  get "/shell_top" => "shell#top"
+  get "/shell_bottom" => "shell#bottom"
+
   get "/new" => "articles#new"
   get "/new/:template" => "articles#new"
 
@@ -342,7 +364,6 @@ Rails.application.routes.draw do
   get "/podcasts", to: redirect("pod")
   get "/readinglist" => "reading_list_items#index"
   get "/readinglist/:view" => "reading_list_items#index", :constraints => { view: /archive/ }
-  get "/history", to: "history#index", as: :history
 
   get "/feed" => "articles#feed", :as => "feed", :defaults => { format: "rss" }
   get "/feed/tag/:tag" => "articles#feed",

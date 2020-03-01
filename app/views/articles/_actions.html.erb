@@ -1,5 +1,5 @@
 <div class="article-actions" id="article-reaction-actions">
-  <% cache("article-main-reactions", expires_in: 200.hours) do %>
+  <% if @article.published? %>
     <button id="reaction-butt-like" class="article-reaction-butt like-reaction-button" data-category="like" alt="heart-emoji" title="heart">
       <img alt="heart" src="<%= asset_path("emoji/emoji-one-heart.png") %>" /><span class="reaction-number" id="reaction-number-like"></span>
     </button>
@@ -9,14 +9,14 @@
     <button id="reaction-butt-readinglist" class="article-reaction-butt readinglist-reaction-button" data-category="readinglist" alt="unicorn-emoji" title="reading list">
       <img alt="reading list" src="<%= asset_path("emoji/emoji-one-bookmark.png") %>" /><span class="reaction-number" id="reaction-number-readinglist"></span>
     </button>
+    <a class="article-actions-tweet-button"
+      id="article-actions-tweet-button"
+      rel="noopener"
+      target='_blank'
+      href='https://twitter.com/intent/tweet?text="<%= u @article.title.strip %>" by <%= @article.user.twitter_username ? "@" + @article.user.twitter_username : @article.user.name %> %23DEVcommunity https://dev.to<%= @article.path %>'>
+      <img src="<%= asset_path("twitter.svg") %>" alt="twitter logo">
+    </a>
   <% end %>
-  <a class="article-actions-tweet-button"
-     id="article-actions-tweet-button"
-     rel="noopener"
-     target='_blank'
-     href='https://twitter.com/intent/tweet?text="<%= u @article.title.strip %>" by <%= @article.user.twitter_username ? "@" + @article.user.twitter_username : @article.user.name %> %23DEVcommunity https://dev.to<%= @article.path %>'>
-    <img src="<%= asset_path("twitter.svg") %>" alt="twitter logo">
-  </a>
   <a class="article-actions-comments-count" href="#comments" id="jump-to-comments">
     DISCUSS
     <% if @article.comments_count.positive? %>

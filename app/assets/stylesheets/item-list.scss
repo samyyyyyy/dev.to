@@ -2,18 +2,14 @@
 @import 'mixins';
 
 .item-list-container {
-  @media screen and (min-width: 950px) {
-    margin-top: -25px;
-  }
-
   a {
     display: block;
   }
 
   .filters {
-    width: 300px;
-    float: left;
-    min-height: 356px;
+    // width: 300px;
+    // float: left;
+    // min-height: 356px;
     position: relative;
 
     input {
@@ -35,6 +31,25 @@
         lighten($light-gray, 2%)
       );
       @include themeable(color, theme-color, $black);
+    }
+
+    .filters-header {
+      display: flex;
+      justify-content: space-between;
+      padding: 10px 5px;
+      .filters-header-text {
+        font-size: 0.9em;
+        font-family: $monospace;
+        text-decoration: underline;
+        @include themeable(color, theme-secondary-color, $medium-gray);
+      }
+      .filters-header-action {
+        font-size: 0.8em;
+        background: none;
+        border: none;
+        text-decoration: underline;
+        @include themeable(color, theme-color, $blue);
+      }
     }
 
     .tags {
@@ -64,24 +79,17 @@
   }
 
   .items-container {
-    width: calc(100% - 20px);
-    margin: 10px auto;
-    margin-left: 10px;
+    padding: 16px;
+    box-sizing: border-box;
+    width: 100%;
     float: left;
 
     @media screen and (min-width: 950px) {
-      width: calc(100% - 332px);
-      margin-left: 20px;
-      margin-top: 0px;
+      width: calc(100% - 280px);
     }
 
     .results {
-      @include themeable(background, theme-container-background, white);
-      @include themeable(
-        border,
-        theme-container-border,
-        1px solid $light-medium-gray
-      );
+      @include dev-card;
       border-radius: 3px;
       min-height: 350px;
       display: none;
@@ -214,7 +222,6 @@
       margin-bottom: -15px;
 
       .filters {
-        height: 85px;
         min-height: 85px;
 
         .tags {

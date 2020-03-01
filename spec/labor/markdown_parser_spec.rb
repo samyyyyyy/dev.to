@@ -1,6 +1,6 @@
 require "rails_helper"
 
-RSpec.describe MarkdownParser do
+RSpec.describe MarkdownParser, type: :labor do
   let(:random_word) { Faker::Lorem.word }
   let(:basic_parsed_markdown) { described_class.new(random_word) }
 
@@ -62,6 +62,24 @@ RSpec.describe MarkdownParser do
   it "renders double backtick code spans properly" do
     code_span = "``#{random_word}``"
     expect(generate_and_parse_markdown(code_span)).to include random_word
+  end
+
+  it "wraps figcaptions with figures" do
+    code_span = "<p>Statement</p>\n<figcaption>A fig</figcaption>"
+    test = generate_and_parse_markdown("<p>case: </p>" + code_span)
+    expect(test).to eq("<p>case: </p>\n<figure>" + code_span + "</figure>\n\n\n\n")
+  end
+
+  it "does not wrap figcaptions already in figures" do
+    code_span = "<figure><p>Statement</p>\n<figcaption>A fig</figcaption></figure>"
+    test = generate_and_parse_markdown(code_span)
+    expect(test).to eq(code_span + "\n\n\n\n")
+  end
+
+  it "does not wrap figcaptions without predecessors" do
+    code_span = "<figcaption>A fig</figcaption>"
+    test = generate_and_parse_markdown(code_span)
+    expect(test).to eq(code_span + "\n\n")
   end
 
   context "when rendering links markdown" do
@@ -177,9 +195,9 @@ RSpec.describe MarkdownParser do
   end
 
   context "when provided with liquid tags" do
-    it "raises error if liquid tag was used incorrectly" do
+    it "does not raises error if liquid tag was used incorrectly" do
       bad_ltag = "{% #{random_word} %}"
-      expect { generate_and_parse_markdown(bad_ltag) }.to raise_error(StandardError)
+      expect { generate_and_parse_markdown(bad_ltag) }.not_to raise_error
     end
   end
 
@@ -245,7 +263,7 @@ RSpec.describe MarkdownParser do
   context "when a colon emoji is used" do
     it "doesn't change text in codeblock" do
       result = generate_and_parse_markdown("<span>:o:<code>:o:</code>:o:<code>:o:</code>:o:<span>:o:</span>:o:</span>")
-      expect(result).to include("<span>⭕️<code>:o:</code>⭕️<code>:o:</code>⭕️<span>⭕️</span>⭕️</span>")
+      expect(result).to include("<span>⭕<code>:o:</code>⭕<code>:o:</code>⭕<span>⭕</span>⭕</span>")
     end
   end
 
@@ -294,6 +312,23 @@ RSpec.describe MarkdownParser do
     it "renders italic" do
       code_block = "word__italic__"
       expect(generate_and_parse_markdown(code_block)).to include("word_<em>italic</em>_")
+    end
+  end
+
+  context "when adding syntax highlighting" do
+    it "defaults to plaintext" do
+      code_block = "```\ntext\n````"
+      expect(generate_and_parse_markdown(code_block)).to include("highlight plaintext")
+    end
+
+    it "adds correct syntax highlighting to codeblocks when the hint is not lowercase" do
+      code_block = "```Ada\nwith Ada.Directories;\n````"
+      expect(generate_and_parse_markdown(code_block)).to include("highlight ada")
+    end
+
+    it "adds correct syntax highlighting to codeblocks when the hint is lowercase" do
+      code_block = "```ada\nwith Ada.Directories;\n````"
+      expect(generate_and_parse_markdown(code_block)).to include("highlight ada")
     end
   end
 end

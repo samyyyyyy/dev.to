@@ -1,14 +1,15 @@
 require "rails_helper"
 
-RSpec.describe CacheBuster do
-  let(:cache_buster) { described_class.new }
+RSpec.describe CacheBuster, type: :labor do
+  let(:cache_buster) { described_class }
   let(:user) { create(:user) }
   let(:article) { create(:article, user_id: user.id) }
-  let(:comment) { create(:comment, user_id: user.id, commentable_id: article.id) }
+  let(:comment) { create(:comment, user_id: user.id, commentable: article) }
   let(:organization) { create(:organization) }
   let(:listing) { create(:classified_listing, user_id: user.id, category: "cfp") }
   let(:podcast) { create(:podcast) }
   let(:podcast_episode) { create(:podcast_episode, podcast_id: podcast.id) }
+  let(:tag) { create(:tag) }
 
   describe "#bust_comment" do
     it "busts comment" do
@@ -40,7 +41,7 @@ RSpec.describe CacheBuster do
 
   describe "#bust_tag" do
     it "busts tag name + tags" do
-      cache_buster.bust_tag("cfp")
+      expect { cache_buster.bust_tag(tag) }.not_to raise_error
     end
   end
 
@@ -79,7 +80,6 @@ RSpec.describe CacheBuster do
 
     it "logs an error from bust_podcast_episode" do
       allow(Rails.logger).to receive(:warn)
-      allow(described_class).to receive(:new).and_return(cache_buster)
       allow(cache_buster).to receive(:bust).and_raise(StandardError)
       cache_buster.bust_podcast_episode(podcast_episode, 12, "-007")
       expect(Rails.logger).to have_received(:warn).once
@@ -88,7 +88,7 @@ RSpec.describe CacheBuster do
 
   describe "#bust_classified_listings" do
     it "busts classified listings" do
-      cache_buster.bust_classified_listings(listing)
+      expect { cache_buster.bust_classified_listings(listing) }.not_to raise_error
     end
   end
 

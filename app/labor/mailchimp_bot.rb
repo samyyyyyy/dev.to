@@ -19,7 +19,7 @@ class MailchimpBot
     # attempt to update email if user changed email addresses
     success = false
     begin
-      gibbon.lists(ApplicationConfig["MAILCHIMP_NEWSLETTER_ID"]).members(target_md5_email).upsert(
+      gibbon.lists(SiteConfig.mailchimp_newsletter_id).members(target_md5_email).upsert(
         body: {
           email_address: user.email,
           status: user.email_newsletter ? "subscribed" : "unsubscribed",
@@ -39,6 +39,24 @@ class MailchimpBot
           }
         },
       )
+
+      success = true
+    rescue Gibbon::MailChimpError => e
+      # If user was previously subscribed, set their status to "pending"
+      return resubscribe_to_newsletter if previously_subcribed?(e)
+
+      report_error(e)
+    end
+    success
+  end
+
+  def resubscribe_to_newsletter
+    success = false
+
+    begin
+      gibbon.lists(SiteConfig.mailchimp_newsletter_id).members(target_md5_email).upsert(
+        body: { status: "pending" },
+      )
       success = true
     rescue Gibbon::MailChimpError => e
       report_error(e)
@@ -52,7 +70,7 @@ class MailchimpBot
     success = false
     status = user.email_community_mod_newsletter ? "subscribed" : "unsubscribed"
     begin
-      gibbon.lists(ApplicationConfig["MAILCHIMP_COMMUNITY_MODERATORS_ID"]).members(target_md5_email).upsert(
+      gibbon.lists(SiteConfig.mailchimp_community_moderators_id).members(target_md5_email).upsert(
         body: {
           email_address: user.email,
           status: status,
@@ -76,10 +94,14 @@ class MailchimpBot
     return false unless user.tag_moderator?
 
     success = false
-    tags = user.roles.where(name: "tag_moderator").map { |tag| Tag.find(tag.resource_id).name }
+
+    tag_ids = user.roles.where(name: "tag_moderator").pluck(:resource_id)
+    tag_names = Tag.where(id: tag_ids).pluck(:name)
+
     status = user.email_tag_mod_newsletter ? "subscribed" : "unsubscribed"
+
     begin
-      gibbon.lists(ApplicationConfig["MAILCHIMP_TAG_MODERATORS_ID"]).members(target_md5_email).upsert(
+      gibbon.lists(SiteConfig.mailchimp_tag_moderators_id).members(target_md5_email).upsert(
         body: {
           email_address: user.email,
           status: status,
@@ -89,7 +111,7 @@ class MailchimpBot
             TWITTER: user.twitter_username.to_s,
             GITHUB: user.github_username.to_s,
             IMAGE_URL: user.profile_image_url.to_s,
-            TAGS: tags.join(", ")
+            TAGS: tag_names.join(", ")
           }
         },
       )
@@ -103,7 +125,7 @@ class MailchimpBot
   def unsub_sustaining_member
     return unless user.tag_moderator?
 
-    gibbon.lists(ApplicationConfig["MAILCHIMP_TAG_MODERATORS_ID"]).members(target_md5_email).update(
+    gibbon.lists(SiteConfig.mailchimp_tag_moderators_id).members(target_md5_email).update(
       body: {
         status: "unsubscribed"
       },
@@ -113,7 +135,7 @@ class MailchimpBot
   def unsub_community_mod
     return unless user.has_role?(:trusted)
 
-    gibbon.lists(ApplicationConfig["MAILCHIMP_COMMUNITY_MODERATORS_ID"]).members(target_md5_email).update(
+    gibbon.lists(SiteConfig.mailchimp_community_moderators_id).members(target_md5_email).update(
       body: {
         status: "unsubscribed"
       },
@@ -123,7 +145,7 @@ class MailchimpBot
   def unsub_tag_mod
     return unless a_sustaining_member?
 
-    gibbon.lists(ApplicationConfig["MAILCHIMP_SUSTAINING_MEMBERS_ID"]).members(target_md5_email).update(
+    gibbon.lists(SiteConfig.mailchimp_sustaining_members_id).members(target_md5_email).update(
       body: {
         status: "unsubscribed"
       },
@@ -133,7 +155,7 @@ class MailchimpBot
   def unsubscribe_all_newsletters
     success = false
     begin
-      gibbon.lists(ApplicationConfig["MAILCHIMP_NEWSLETTER_ID"]).members(target_md5_email).update(
+      gibbon.lists(SiteConfig.mailchimp_newsletter_id).members(target_md5_email).update(
         body: {
           status: "unsubscribed"
         },
@@ -162,12 +184,16 @@ class MailchimpBot
   end
 
   def report_error(exception)
-    logger = Logger.new(STDOUT)
-    logger.error(exception)
+    Rails.logger.error(exception)
+    DatadogStatsClient.increment("mailchimp.errors", tags: [action: "failed", user_id: user.id, source: "gibbon-gem"])
   end
 
   def target_md5_email
     email = saved_changes["unconfirmed_email"] ? saved_changes["email"][0] : user.email
     md5_email(email)
+  end
+
+  def previously_subcribed?(error)
+    error.title.match?(/Member In Compliance State/)
   end
 end

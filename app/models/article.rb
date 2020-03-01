@@ -39,13 +39,13 @@ class Article < ApplicationRecord
   validates :canonical_url,
             url: { allow_blank: true, no_local: true, schemes: %w[https http] },
             uniqueness: { allow_blank: true }
-  # validates :description, length: { in: 10..170, if: :published? }
-  validates :body_markdown, uniqueness: { scope: %i[user_id title] }
+  validates :body_markdown, length: { minimum: 0, allow_nil: false }, uniqueness: { scope: %i[user_id title] }
   validate :validate_tag
   validate :validate_video
   validate :validate_collection_permission
   validate :validate_liquid_tag_permissions
   validate :past_or_present_date
+  validate :canonical_url_must_not_have_spaces
   validates :video_state, inclusion: { in: %w[PROGRESSING COMPLETED] }, allow_nil: true
   validates :cached_tag_list, length: { maximum: 126 }
   validates :main_image, url: { allow_blank: true, schemes: %w[https http] }
@@ -56,6 +56,7 @@ class Article < ApplicationRecord
   validates :video_closed_caption_track_url, url: { allow_blank: true, schemes: ["https"] }
   validates :video_source_url, url: { allow_blank: true, schemes: ["https"] }
 
+  after_update_commit :update_notifications, if: proc { |article| article.notifications.any? && !article.saved_changes.empty? }
   before_validation :evaluate_markdown
   before_validation :create_slug
   before_create     :create_password
@@ -64,12 +65,11 @@ class Article < ApplicationRecord
   before_save       :set_caches
   before_save       :fetch_video_duration
   before_save       :clean_data
-  after_save        :async_score_calc, if: :published
+  after_commit      :async_score_calc
   after_save        :bust_cache
-  after_save        :update_main_image_background_hex
+  after_commit      :update_main_image_background_hex
   after_save        :detect_human_language
   before_save       :update_cached_user
-  after_update      :update_notifications, if: proc { |article| article.notifications.any? && !article.saved_changes.empty? }
   before_destroy    :before_destroy_actions, prepend: true
 
   serialize :ids_for_suggested_articles
@@ -80,6 +80,8 @@ class Article < ApplicationRecord
   scope :unpublished, -> { where(published: false) }
 
   scope :cached_tagged_with, ->(tag) { where("cached_tag_list ~* ?", "^#{tag},| #{tag},|, #{tag}$|^#{tag}$") }
+
+  scope :cached_tagged_by_approval_with, ->(tag) { cached_tagged_with(tag).where(approved: true) }
 
   scope :active_help, lambda {
                         published.
@@ -137,6 +139,10 @@ class Article < ApplicationRecord
     order(column => dir.to_sym)
   }
 
+  scope :feed, -> { published.select(:id, :published_at, :processed_html, :user_id, :organization_id, :title, :path) }
+
+  scope :with_video, -> { published.where.not(video: [nil, ""], video_thumbnail_url: [nil, ""]).where("score > ?", -4) }
+
   algoliasearch per_environment: true, auto_remove: false, enqueue: :trigger_index do
     attribute :title
     add_index "searchables", id: :index_id, per_environment: true, enqueue: :trigger_index do
@@ -144,10 +150,10 @@ class Article < ApplicationRecord
                  :featured, :published, :published_at, :featured_number,
                  :comments_count, :reactions_count, :positive_reactions_count,
                  :path, :class_name, :user_name, :user_username, :comments_blob,
-                 :body_text, :tag_keywords_for_search, :search_score, :readable_publish_date, :flare_tag
+                 :body_text, :tag_keywords_for_search, :search_score, :readable_publish_date, :flare_tag, :approved
       attribute :user do
         { username: user.username, name: user.name,
-          profile_image_90: ProfileImage.new(user).get(90), pro: user.pro? }
+          profile_image_90: ProfileImage.new(user).get(width: 90), pro: user.pro? }
       end
       tags do
         [tag_list,
@@ -163,27 +169,27 @@ class Article < ApplicationRecord
                             "user_name",
                             "user_username",
                             "comments_blob"]
-      attributesForFaceting [:class_name]
+      attributesForFaceting %i[class_name approved]
       customRanking ["desc(search_score)", "desc(hotness_score)"]
     end
 
     add_index "ordered_articles", id: :index_id, per_environment: true, enqueue: :trigger_index do
       attributes :title, :path, :class_name, :comments_count, :reading_time, :language,
                  :tag_list, :positive_reactions_count, :id, :hotness_score, :score, :readable_publish_date, :flare_tag, :user_id,
-                 :organization_id, :cloudinary_video_url, :video_duration_in_minutes, :experience_level_rating, :experience_level_rating_distribution
+                 :organization_id, :cloudinary_video_url, :video_duration_in_minutes, :experience_level_rating, :experience_level_rating_distribution, :approved
       attribute :published_at_int do
         published_at.to_i
       end
       attribute :user do
         { username: user.username,
           name: user.name,
-          profile_image_90: ProfileImage.new(user).get(90) }
+          profile_image_90: ProfileImage.new(user).get(width: 90) }
       end
       attribute :organization do
         if organization
           { slug: organization.slug,
             name: organization.name,
-            profile_image_90: ProfileImage.new(organization).get(90) }
+            profile_image_90: ProfileImage.new(organization).get(width: 90) }
         end
       end
       tags do
@@ -241,37 +247,52 @@ class Article < ApplicationRecord
     stories.pluck(:path, :title, :comments_count, :created_at)
   end
 
-  def body_text
-    ActionView::Base.full_sanitizer.sanitize(processed_html)[0..7000]
-  end
+  def self.seo_boostable(tag = nil, time_ago = 18.days.ago)
+    time_ago = 5.days.ago if time_ago == "latest" # Time ago sometimes returns this phrase instead of a date
+    time_ago = 75.days.ago if time_ago.nil? # Time ago sometimes is given as nil and should then be the default. I know, sloppy.
 
-  def index_id
-    "articles-#{id}"
+    relation = Article.published.
+      order(organic_page_views_past_month_count: :desc).
+      where("score > ?", 8).
+      where("published_at > ?", time_ago).
+      limit(25)
+
+    fields = %i[path title comments_count created_at]
+    if tag
+      relation.cached_tagged_with(tag).pluck(*fields)
+    else
+      relation.pluck(*fields)
+    end
   end
 
   def self.trigger_index(record, remove)
     # on destroy an article is removed from index in a before_destroy callback #before_destroy_actions
     return if remove
 
-    AlgoliaSearch::AlgoliaJob.perform_later(record, "index_or_remove_from_index_where_appropriate")
+    if record.published && record.tag_list.exclude?("hiring")
+      Search::IndexWorker.perform_async("Article", record.id)
+    else
+      Search::RemoveFromIndexWorker.perform_async(Article.algolia_index_name, record.id)
+      Search::RemoveFromIndexWorker.perform_async("searchables_#{Rails.env}", record.index_id)
+      Search::RemoveFromIndexWorker.perform_async("ordered_articles_#{Rails.env}", record.index_id)
+    end
   end
 
-  def index_or_remove_from_index_where_appropriate
-    if published && tag_list.exclude?("hiring")
-      index!
-    else
-      remove_algolia_index
-    end
+  def processed_description
+    text_portion = body_text.present? ? body_text[0..100].tr("\n", " ").strip.to_s : ""
+    text_portion = text_portion.strip + "..." if body_text.size > 100
+    return "A post by #{user.name}" if text_portion.blank?
+
+    text_portion.strip
+  end
+
+  def body_text
+    ActionView::Base.full_sanitizer.sanitize(processed_html)[0..7000]
   end
 
   def remove_algolia_index
     remove_from_index!
     delete_related_objects
-  end
-
-  def delete_related_objects
-    Search::RemoveFromIndexJob.perform_now("searchables_#{Rails.env}", index_id)
-    Search::RemoveFromIndexJob.perform_now("ordered_articles_#{Rails.env}", index_id)
   end
 
   def touch_by_reaction
@@ -295,44 +316,12 @@ class Article < ApplicationRecord
     published ? "/#{username}/#{slug}" : "/#{username}/#{slug}?preview=#{password}"
   end
 
-  def search_score
-    calculated_score = hotness_score.to_i + ((comments_count * 3).to_i + positive_reactions_count.to_i * 300 * user.reputation_modifier * score.to_i)
-    calculated_score.to_i
-  end
-
-  def calculated_path
-    if organization
-      "/#{organization.slug}/#{slug}"
-    else
-      "/#{username}/#{slug}"
-    end
-  end
-
-  def set_caches
-    return unless user
-
-    self.cached_user_name = user_name
-    self.cached_user_username = user_username
-    self.path = calculated_path
-  end
-
-  def evaluate_markdown
-    fixed_body_markdown = MarkdownFixer.fix_all(body_markdown || "")
-    parsed = FrontMatterParser::Parser.new(:md).call(fixed_body_markdown)
-    parsed_markdown = MarkdownParser.new(parsed.content)
-    self.reading_time = parsed_markdown.calculate_reading_time
-    self.processed_html = parsed_markdown.finalize
-    evaluate_front_matter(parsed.front_matter)
-  rescue StandardError => e
-    errors[:base] << ErrorMessageCleaner.new(e.message).clean
-  end
-
   def has_frontmatter?
     fixed_body_markdown = MarkdownFixer.fix_all(body_markdown)
     begin
       parsed = FrontMatterParser::Parser.new(:md).call(fixed_body_markdown)
       parsed.front_matter["title"].present?
-    rescue Psych::SyntaxError
+    rescue Psych::SyntaxError, Psych::DisallowedClass
       # if frontmatter is invalid, still render editor with errors instead of 500ing
       true
     end
@@ -344,22 +333,6 @@ class Article < ApplicationRecord
 
   def flare_tag
     @flare_tag ||= FlareTag.new(self).tag_hash
-  end
-
-  def update_main_image_background_hex
-    return if main_image.blank? || main_image_background_hex_color != "#dddddd"
-
-    Articles::UpdateMainImageBackgroundHexJob.perform_later(id)
-  end
-
-  def detect_human_language
-    return if language.present?
-
-    Articles::DetectHumanLanguageJob.perform_later(id)
-  end
-
-  def tag_keywords_for_search
-    tags.pluck(:keywords_for_search).join
   end
 
   def edited?
@@ -392,25 +365,6 @@ class Article < ApplicationRecord
     (crossposted_at || published_at).utc.iso8601
   end
 
-  def self.seo_boostable(tag = nil, time_ago = 18.days.ago)
-    time_ago = 5.days.ago if time_ago == "latest" # Time ago sometimes returns this phrase instead of a date
-    time_ago = 75.days.ago if time_ago.nil? # Time ago sometimes is given as nil and should then be the default. I know, sloppy.
-    if tag
-      Article.published.
-        cached_tagged_with(tag).order("organic_page_views_past_month_count DESC").where("score > ?", 8).where("published_at > ?", time_ago).
-        limit(25).
-        pluck(:path, :title, :comments_count, :created_at)
-    else
-      Article.published.
-        order("organic_page_views_past_month_count DESC").limit(25).where("score > ?", 8).where("published_at > ?", time_ago).
-        pluck(:path, :title, :comments_count, :created_at)
-    end
-  end
-
-  def async_score_calc
-    Articles::ScoreCalcJob.perform_later(id)
-  end
-
   def series
     # name of series article is part of
     collection&.slug
@@ -437,6 +391,81 @@ class Article < ApplicationRecord
     hours < 1 ? "#{minutes}:#{seconds}" : "#{hours}:#{minutes}:#{seconds}"
   end
 
+  # keep public because it's used in algolia jobs
+  def index_id
+    "articles-#{id}"
+  end
+
+  def update_score
+    new_score = reactions.sum(:points) + Reaction.where(reactable_id: user_id, reactable_type: "User").sum(:points)
+    update_columns(score: new_score,
+                   comment_score: comments.sum(:score),
+                   hotness_score: BlackBox.article_hotness_score(self),
+                   spaminess_rating: BlackBox.calculate_spaminess(self))
+  end
+
+  private
+
+  def delete_related_objects
+    Search::RemoveFromIndexWorker.new.perform("searchables_#{Rails.env}", index_id)
+    Search::RemoveFromIndexWorker.new.perform("ordered_articles_#{Rails.env}", index_id)
+  end
+
+  def search_score
+    calculated_score = hotness_score.to_i + ((comments_count * 3).to_i + positive_reactions_count.to_i * 300 * user.reputation_modifier * score.to_i)
+    calculated_score.to_i
+  end
+
+  def tag_keywords_for_search
+    tags.pluck(:keywords_for_search).join
+  end
+
+  def calculated_path
+    if organization
+      "/#{organization.slug}/#{slug}"
+    else
+      "/#{username}/#{slug}"
+    end
+  end
+
+  def set_caches
+    return unless user
+
+    self.cached_user_name = user_name
+    self.cached_user_username = user_username
+    self.path = calculated_path
+  end
+
+  def evaluate_markdown
+    fixed_body_markdown = MarkdownFixer.fix_all(body_markdown || "")
+    parsed = FrontMatterParser::Parser.new(:md).call(fixed_body_markdown)
+    parsed_markdown = MarkdownParser.new(parsed.content)
+    self.reading_time = parsed_markdown.calculate_reading_time
+    self.processed_html = parsed_markdown.finalize
+    evaluate_front_matter(parsed.front_matter)
+    self.description = processed_description if description.blank?
+  rescue StandardError => e
+    errors[:base] << ErrorMessageCleaner.new(e.message).clean
+  end
+
+  def update_main_image_background_hex
+    return if main_image.blank? || main_image_background_hex_color != "#dddddd"
+
+    Articles::UpdateMainImageBackgroundHexWorker.perform_async(id)
+  end
+
+  def detect_human_language
+    return if language.present?
+
+    update_column(:language, LanguageDetector.new(self).detect)
+  end
+
+  def async_score_calc
+    return if !published? || destroyed?
+
+    Articles::ScoreCalcWorker.perform_async(id)
+  end
+
   def fetch_video_duration
     if video.present? && video_duration_in_seconds.zero?
       url = video_source_url.gsub(".m3u8", "1351620000001-200015_hls_v4.m3u8")
@@ -457,8 +486,6 @@ class Article < ApplicationRecord
     []
   end
 
-  private
-
   def update_notifications
     Notification.update_notifications(self, "Published")
   end
@@ -473,7 +500,7 @@ class Article < ApplicationRecord
     end
     # perform busting cache in chunks in case there're a lot of articles
     (article_ids.uniq.sort - [id]).each_slice(10) do |ids|
-      Articles::BustMultipleCachesJob.perform_later(ids)
+      Articles::BustMultipleCachesWorker.perform_async(ids)
     end
   end
 
@@ -484,12 +511,13 @@ class Article < ApplicationRecord
       self.tag_list = [] # overwrite any existing tag with those from the front matter
       tag_list.add(front_matter["tags"], parser: ActsAsTaggableOn::TagParser)
       remove_tag_adjustments_from_tag_list
+      add_tag_adjustments_to_tag_list
     end
     self.published = front_matter["published"] if %w[true false].include?(front_matter["published"].to_s)
     self.published_at = parse_date(front_matter["date"]) if published
     self.main_image = front_matter["cover_image"] if front_matter["cover_image"].present?
     self.canonical_url = front_matter["canonical_url"] if front_matter["canonical_url"].present?
-    self.description = front_matter["description"] || description || "#{body_text[0..80]}..."
+    self.description = front_matter["description"] if front_matter["description"].present? || front_matter["title"].present? # Do this if frontmatte exists at all
     self.collection_id = nil if front_matter["title"].present?
     self.collection_id = Collection.find_series(front_matter["series"], user).id if front_matter["series"].present?
     self.automatically_renew = front_matter["automatically_renew"] if front_matter["automatically_renew"].present? && tag_list.include?("hiring")
@@ -503,13 +531,16 @@ class Article < ApplicationRecord
   def validate_tag
     # remove adjusted tags
     remove_tag_adjustments_from_tag_list
+    add_tag_adjustments_to_tag_list
 
     # check there are not too many tags
     return errors.add(:tag_list, "exceed the maximum of 4 tags") if tag_list.size > 4
 
-    # check tags names aren't too long
+    # check tags names aren't too long and don't contain non alphabet characters
     tag_list.each do |tag|
-      errors.add(:tag, "\"#{tag}\" is too long (maximum is 30 characters)") if tag.length > 30
+      new_tag = Tag.new(name: tag)
+      new_tag.validate_name
+      new_tag.errors.messages[:name].each { |message| errors.add(:tag, "\"#{tag}\" #{message}") }
     end
   end
 
@@ -518,9 +549,14 @@ class Article < ApplicationRecord
     tag_list.remove(tags_to_remove, parser: ActsAsTaggableOn::TagParser) if tags_to_remove
   end
 
+  def add_tag_adjustments_to_tag_list
+    tags_to_add = TagAdjustment.where(article_id: id, adjustment_type: "addition", status: "committed").pluck(:tag_name)
+    tag_list.add(tags_to_add, parser: ActsAsTaggableOn::TagParser) if tags_to_add
+  end
+
   def validate_video
     return errors.add(:published, "cannot be set to true if video is still processing") if published && video_state == "PROGRESSING"
-    return errors.add(:video, "cannot be added member without permission") if video.present? && user.created_at > 2.weeks.ago
+    return errors.add(:video, "cannot be added by member without permission") if video.present? && user.created_at > 2.weeks.ago
   end
 
   def validate_collection_permission
@@ -531,6 +567,10 @@ class Article < ApplicationRecord
     if published_at && published_at > Time.current
       errors.add(:date_time, "must be entered in DD/MM/YYYY format with current or past date")
     end
+  end
+
+  def canonical_url_must_not_have_spaces
+    errors.add(:canonical_url, "must not have spaces") if canonical_url.to_s.match?(/[[:space:]]/)
   end
 
   # Admin only beta tags etc.
@@ -583,6 +623,7 @@ class Article < ApplicationRecord
     set_featured_number
     set_crossposted_at
     set_last_comment_at
+    set_nth_published_at
   end
 
   def set_published_date
@@ -605,6 +646,12 @@ class Article < ApplicationRecord
     organization&.touch(:last_article_at)
   end
 
+  def set_nth_published_at
+    published_article_ids = user.articles.published.order("published_at ASC").pluck(:id)
+    index = published_article_ids.index(id)
+    self.nth_published_by_author = (index || published_article_ids.size) + 1 if nth_published_by_author.zero? && published
+  end
+
   def title_to_slug
     title.to_s.downcase.parameterize.tr("_", "") + "-" + rand(100_000).to_s(26)
   end
@@ -616,10 +663,9 @@ class Article < ApplicationRecord
   def bust_cache
     return unless Rails.env.production?
 
-    cache_buster = CacheBuster.new
-    cache_buster.bust(path)
-    cache_buster.bust(path + "?i=i")
-    cache_buster.bust(path + "?preview=" + password)
+    CacheBuster.bust(path)
+    CacheBuster.bust("#{path}?i=i")
+    CacheBuster.bust("#{path}?preview=#{password}")
     async_bust
   end
 
@@ -629,6 +675,6 @@ class Article < ApplicationRecord
   end
 
   def async_bust
-    Articles::BustCacheJob.perform_later(id)
+    Articles::BustCacheWorker.perform_async(id)
   end
 end

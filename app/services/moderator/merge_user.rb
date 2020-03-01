@@ -25,7 +25,7 @@ module Moderator
       @delete_user.delete
       @keep_user.touch(:profile_updated_at)
 
-      CacheBuster.new.bust "/#{@keep_user.username}"
+      CacheBuster.bust("/#{@keep_user.username}")
     end
 
     private
@@ -87,7 +87,7 @@ module Moderator
 
     def merge_follows
       @delete_user.follows&.update_all(follower_id: @keep_user.id) if @delete_user.follows.any?
-      @delete_user_followers = Follow.where(followable_id: @delete_user.id, followable_type: "User")
+      @delete_user_followers = Follow.followable_user(@delete_user.id)
       @delete_user_followers.update_all(followable_id: @keep_user.id) if @delete_user_followers.any?
     end
 

@@ -31,8 +31,11 @@ module.exports = {
         },
       },
     ],
+    'react/jsx-no-target-blank': [2, { enforceDynamicLinks: 'always' }],
   },
   globals: {
+    getCsrfToken: false,
+    sendFetch: false,
     InstantClick: false,
     filterXSS: false,
     Pusher: false,

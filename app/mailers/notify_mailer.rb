@@ -1,4 +1,8 @@
 class NotifyMailer < ApplicationMailer
+  SUBJECTS = {
+    new_follower_email: "just followed you on dev.to".freeze
+  }.freeze
+
   def new_reply_email(comment)
     @user = comment.parent_user
     return if RateLimitChecker.new.limit_by_email_recipient_address(@user.email)
@@ -15,7 +19,7 @@ class NotifyMailer < ApplicationMailer
     @follower = follow.follower
     @unsubscribe = generate_unsubscribe_token(@user.id, :email_follower_notifications)
 
-    mail(to: @user.email, subject: "#{@follower.name} just followed you on dev.to")
+    mail(to: @user.email, subject: "#{@follower.name} #{SUBJECTS[__method__]}")
   end
 
   def new_mention_email(mention)
@@ -50,6 +54,7 @@ class NotifyMailer < ApplicationMailer
     @badge_achievement = badge_achievement
     @user = @badge_achievement.user
     @badge = @badge_achievement.badge
+    @unsubscribe = generate_unsubscribe_token(@user.id, :email_badge_notifications)
     mail(to: @user.email, subject: "You just got a badge")
   end
 
@@ -65,12 +70,20 @@ class NotifyMailer < ApplicationMailer
     @message = direct_message
     @user = @message.direct_receiver
     subject = "#{@message.user.name} just messaged you"
+    @unsubscribe = generate_unsubscribe_token(@user.id, :email_connect_messages)
     mail(to: @user.email, subject: subject)
   end
 
   def account_deleted_email(user)
     @name = user.name
     subject = "dev.to - Account Deletion Confirmation"
+    mail(to: user.email, subject: subject)
+  end
+
+  def account_deletion_requested_email(user, token)
+    @name = user.name
+    @token = token
+    subject = "dev.to - Account Deletion Requested"
     mail(to: user.email, subject: subject)
   end
 

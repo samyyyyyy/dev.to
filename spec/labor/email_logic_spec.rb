@@ -1,9 +1,7 @@
 require "rails_helper"
 
-RSpec.describe EmailLogic do
+RSpec.describe EmailLogic, type: :labor do
   let(:user) { create(:user) }
-
-  # TODO: improve this test suite, and improve it's speed
 
   describe "#analyze" do
     context "when user is brand new with no-follow" do

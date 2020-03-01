@@ -1,6 +1,6 @@
 require "rails_helper"
 
-RSpec.describe ClassifiedListingTag, type: :liquid_template do
+RSpec.describe ClassifiedListingTag, type: :liquid_tag do
   let(:user) { create(:user, username: "dariamorgendorffer", name: "Daria Morgendorffer") }
   let(:user_listing) do
     create(
@@ -31,7 +31,11 @@ RSpec.describe ClassifiedListingTag, type: :liquid_template do
     )
   end
   let(:org) { create(:organization) }
-  let(:org_user) { create(:user, organization_id: org.id) }
+  let(:org_user) do
+    user = create(:user)
+    create(:organization_membership, user: user, organization: org)
+    user
+  end
   let(:org_listing) do
     create(
       :classified_listing,
