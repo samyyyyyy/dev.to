@@ -8,7 +8,9 @@ module ApplicationHelper
   end
 
   def view_class
-    if @story_show # custom due to edge cases
+    if @podcast_episode_show # custom due to edge cases
+      "stories stories-show podcast_episodes-show"
+    elsif @story_show
       "stories stories-show"
     else
       "#{controller_name} #{controller_name}-#{controller.action_name}"
@@ -99,7 +101,7 @@ module ApplicationHelper
   end
 
   def sanitize_rendered_markdown(processed_html)
-    ActionController::Base.helpers.sanitize processed_html.html_safe,
+    ActionController::Base.helpers.sanitize processed_html,
                                             scrubber: RenderedMarkdownScrubber.new
   end
 
@@ -153,5 +155,9 @@ module ApplicationHelper
     return path if heroku_slug_commit.blank?
 
     "#{path}-#{heroku_slug_commit}"
+  end
+
+  def app_protocol_and_domain
+    "#{ApplicationConfig['APP_PROTOCOL']}#{ApplicationConfig['APP_DOMAIN']}"
   end
 end

@@ -648,7 +648,7 @@
         display: inline-block;
       }
       .tag {
-        margin-right: 3px;
+        margin-right: 8px;
         &:hover {
           text-decoration: underline;
         }
@@ -691,7 +691,7 @@
           padding: 16px;
           margin: 0;
           word-break: break-word;
-
+          line-height: 1.28em;
           @media screen and (min-width: 450px) {
             font-size: 40px;
           }
@@ -863,6 +863,10 @@
       height: 339px;
     }
   }
+}
+
+#homepage-feed {
+  min-height: 100vh;
 }
 
 // Podcast episode that goes within the <TodaysPodcast /> component.

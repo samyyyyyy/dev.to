@@ -39,6 +39,14 @@ RSpec.describe "/internal/config", type: :request do
         sign_in(admin_plus_config)
       end
 
+      describe "content" do
+        it "updates the community_description" do
+          description = "Hey hey #{rand(100)}"
+          post "/internal/config", params: { site_config: { community_description: description }, confirmation: confirmation_message }
+          expect(SiteConfig.community_description).to eq(description)
+        end
+      end
+
       describe "staff" do
         it "does not allow the staff_user_id to be updated" do
           expect(SiteConfig.staff_user_id).to eq(1)
@@ -58,6 +66,14 @@ RSpec.describe "/internal/config", type: :request do
           post "/internal/config", params: { site_config: { social_networks_handle: expected_handle },
                                              confirmation: confirmation_message }
           expect(SiteConfig.social_networks_handle).to eq(expected_handle)
+        end
+      end
+
+      describe "mascot" do
+        it "updates the mascot_user_id" do
+          expected_mascot_user_id = 2
+          post "/internal/config", params: { site_config: { mascot_user_id: expected_mascot_user_id }, confirmation: confirmation_message }
+          expect(SiteConfig.mascot_user_id).to eq(expected_mascot_user_id)
         end
       end
 
@@ -178,6 +194,28 @@ RSpec.describe "/internal/config", type: :request do
         it "downcases suggested_tags" do
           post "/internal/config", params: { site_config: { suggested_tags: "hey, haha,hoHo, Bobo Fofo" }, confirmation: confirmation_message }
           expect(SiteConfig.suggested_tags).to eq(%w[hey haha hoho bobofofo])
+        end
+
+        it "removes space sidebar_tags" do
+          post "/internal/config", params: { site_config: { sidebar_tags: "hey, haha,hoho, bobo fofo" }, confirmation: confirmation_message }
+          expect(SiteConfig.sidebar_tags).to eq(%w[hey haha hoho bobofofo])
+        end
+
+        it "downcases sidebar_tags" do
+          post "/internal/config", params: { site_config: { sidebar_tags: "hey, haha,hoHo, Bobo Fofo" }, confirmation: confirmation_message }
+          expect(SiteConfig.sidebar_tags).to eq(%w[hey haha hoho bobofofo])
+        end
+      end
+
+      describe "Authentication" do
+        it "removes space authentication_providers" do
+          post "/internal/config", params: { site_config: { authentication_providers: "github, twitter" }, confirmation: confirmation_message }
+          expect(SiteConfig.authentication_providers).to eq(%w[github twitter])
+        end
+
+        it "downcases authentication_providers" do
+          post "/internal/config", params: { site_config: { authentication_providers: "GitHub, Twitter" }, confirmation: confirmation_message }
+          expect(SiteConfig.authentication_providers).to eq(%w[github twitter])
         end
       end
     end

@@ -8,15 +8,22 @@ class SiteConfig < RailsSettings::Base
   # the cache, or call SiteConfig.clear_cache
   cache_prefix { "v1" }
 
+  # site content
+  field :community_description, type: :string, default: "A constructive and inclusive social network. Open source and radically transparent."
+
   # staff account
   field :staff_user_id, type: :integer, default: 1
   field :default_site_email, type: :string, default: "yo@dev.to"
   field :social_networks_handle, type: :string, default: "thepracticaldev"
 
+  # mascot account
+  field :mascot_user_id, type: :integer, default: 1
+
+  # Authentication
+  field :authentication_providers, type: :array, default: %w[twitter github]
+
   # campaign
   field :campaign_hero_html_variant_name, type: :string, default: ""
-  field :campaign_background_color, type: :string, default: "FFFFFF"
-  field :campaign_text_color, type: :string, default: "000000"
   field :campaign_featured_tags, type: :array, default: %w[]
   field :campaign_sidebar_enabled, type: :boolean, default: 0
   field :campaign_sidebar_image, type: :string, default: nil
@@ -55,4 +62,10 @@ class SiteConfig < RailsSettings::Base
 
   # Tags
   field :suggested_tags, type: :array, default: %w[beginners career computerscience javascript security ruby rails swift kotlin]
+  field :sidebar_tags, type: :array, default: %w[help challenge discuss explainlikeimfive meta watercooler]
+
+  # Helpful methods
+  def self.auth_allowed?(provider)
+    authentication_providers.include?(provider)
+  end
 end

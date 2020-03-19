@@ -4,6 +4,10 @@ class Article < ApplicationRecord
   include AlgoliaSearch
   include Storext.model
   include Reactable
+  include Searchable
+
+  SEARCH_SERIALIZER = Search::ArticleSerializer
+  SEARCH_CLASS = Search::FeedContent
 
   acts_as_taggable_on :tags
   resourcify
@@ -17,7 +21,9 @@ class Article < ApplicationRecord
   belongs_to :user
   belongs_to :job_opportunity, optional: true
   belongs_to :organization, optional: true
-  belongs_to :collection, optional: true, touch: true
+  # touch: true was removed because when an article is updated, the associated collection
+  # is touched along with all its articles(including this one). This causes eventually a deadlock.
+  belongs_to :collection, optional: true
 
   counter_culture :user
   counter_culture :organization
@@ -56,21 +62,24 @@ class Article < ApplicationRecord
   validates :video_closed_caption_track_url, url: { allow_blank: true, schemes: ["https"] }
   validates :video_source_url, url: { allow_blank: true, schemes: ["https"] }
 
+  before_validation :evaluate_markdown, :create_slug
+  before_create :create_password
+  before_save :set_all_dates
+  before_save :calculate_base_scores
+  before_save :set_caches
+  before_save :fetch_video_duration
+  before_save :clean_data
+  before_save :update_cached_user
+
+  after_save :bust_cache, :detect_human_language
+  after_save :notify_slack_channel_about_publication, if: -> { published && published_at > 30.seconds.ago }
+
   after_update_commit :update_notifications, if: proc { |article| article.notifications.any? && !article.saved_changes.empty? }
-  before_validation :evaluate_markdown
-  before_validation :create_slug
-  before_create     :create_password
-  before_save       :set_all_dates
-  before_save       :calculate_base_scores
-  before_save       :set_caches
-  before_save       :fetch_video_duration
-  before_save       :clean_data
-  after_commit      :async_score_calc
-  after_save        :bust_cache
-  after_commit      :update_main_image_background_hex
-  after_save        :detect_human_language
-  before_save       :update_cached_user
-  before_destroy    :before_destroy_actions, prepend: true
+  after_commit :async_score_calc, :update_main_image_background_hex, :touch_collection
+  after_commit :index_to_elasticsearch, on: %i[create update]
+  after_commit :remove_from_elasticsearch, on: [:destroy]
+
+  before_destroy :before_destroy_actions, prepend: true
 
   serialize :ids_for_suggested_articles
   serialize :cached_user
@@ -193,13 +202,11 @@ class Article < ApplicationRecord
         end
       end
       tags do
-        [tag_list,
-         "user_#{user_id}",
-         "username_#{user&.username}",
-         "lang_#{language || 'en'}",
+        [tag_list, "user_#{user_id}", "username_#{user&.username}", "lang_#{language || 'en'}",
          ("organization_#{organization_id}" if organization)].flatten.compact
       end
       ranking ["desc(hotness_score)"]
+      attributesForFaceting %i[class_name approved]
       add_replica "ordered_articles_by_positive_reactions_count", inherit: true, per_environment: true do
         ranking ["desc(positive_reactions_count)"]
       end
@@ -227,23 +234,6 @@ class Article < ApplicationRecord
                   where("published_at > ? AND score > ?", (tags.present? ? 5 : 2).days.ago, -5)
               end
     stories = tags.size == 1 ? stories.cached_tagged_with(tags.first) : stories.tagged_with(tags)
-    stories.pluck(:path, :title, :comments_count, :created_at)
-  end
-
-  def self.active_eli5(time_ago)
-    stories = published.cached_tagged_with("explainlikeimfive")
-
-    stories = if time_ago == "latest"
-                stories.order("published_at DESC").limit(3)
-              elsif time_ago
-                stories.order("comments_count DESC").
-                  where("published_at > ?", time_ago).
-                  limit(6)
-              else
-                stories.order("last_comment_at DESC").
-                  where("published_at > ?", 5.days.ago).
-                  limit(3)
-              end
     stories.pluck(:path, :title, :comments_count, :created_at)
   end
 
@@ -382,13 +372,17 @@ class Article < ApplicationRecord
   end
 
   def video_duration_in_minutes
-    minutes = (video_duration_in_seconds.to_i / 60) % 60
+    minutes = video_duration_in_minutes_integer
     seconds = video_duration_in_seconds.to_i % 60
     seconds = "0#{seconds}" if seconds.to_s.size == 1
 
     hours = (video_duration_in_seconds.to_i / 3600)
     minutes = "0#{minutes}" if hours.positive? && minutes < 10
     hours < 1 ? "#{minutes}:#{seconds}" : "#{hours}:#{minutes}:#{seconds}"
+  end
+
+  def video_duration_in_minutes_integer
+    (video_duration_in_seconds.to_i / 60) % 60
   end
 
   # keep public because it's used in algolia jobs
@@ -515,12 +509,25 @@ class Article < ApplicationRecord
     end
     self.published = front_matter["published"] if %w[true false].include?(front_matter["published"].to_s)
     self.published_at = parse_date(front_matter["date"]) if published
-    self.main_image = front_matter["cover_image"] if front_matter["cover_image"].present?
+    self.main_image = determine_image(front_matter)
     self.canonical_url = front_matter["canonical_url"] if front_matter["canonical_url"].present?
     self.description = front_matter["description"] if front_matter["description"].present? || front_matter["title"].present? # Do this if frontmatte exists at all
     self.collection_id = nil if front_matter["title"].present?
     self.collection_id = Collection.find_series(front_matter["series"], user).id if front_matter["series"].present?
     self.automatically_renew = front_matter["automatically_renew"] if front_matter["automatically_renew"].present? && tag_list.include?("hiring")
+  end
+
+  def determine_image(front_matter)
+    # In order to clear out the cover_image, we check for the key in the front_matter.
+    # If the key exists, we use the value from it (a url or `nil`).
+    # Otherwise, we fall back to the main_image on the article.
+    has_cover_image = front_matter.include?("cover_image")
+
+    if has_cover_image && (front_matter["cover_image"].present? || main_image)
+      front_matter["cover_image"]
+    else
+      main_image
+    end
   end
 
   def parse_date(date)
@@ -546,12 +553,12 @@ class Article < ApplicationRecord
 
   def remove_tag_adjustments_from_tag_list
     tags_to_remove = TagAdjustment.where(article_id: id, adjustment_type: "removal", status: "committed").pluck(:tag_name)
-    tag_list.remove(tags_to_remove, parser: ActsAsTaggableOn::TagParser) if tags_to_remove
+    tag_list.remove(tags_to_remove, parser: ActsAsTaggableOn::TagParser) if tags_to_remove.present?
   end
 
   def add_tag_adjustments_to_tag_list
     tags_to_add = TagAdjustment.where(article_id: id, adjustment_type: "addition", status: "committed").pluck(:tag_name)
-    tag_list.add(tags_to_add, parser: ActsAsTaggableOn::TagParser) if tags_to_add
+    tag_list.add(tags_to_add, parser: ActsAsTaggableOn::TagParser) if tags_to_add.present?
   end
 
   def validate_video
@@ -676,5 +683,25 @@ class Article < ApplicationRecord
 
   def async_bust
     Articles::BustCacheWorker.perform_async(id)
+  end
+
+  def touch_collection
+    collection.touch if collection && previous_changes.present?
+  end
+
+  def notify_slack_channel_about_publication
+    url = "#{ApplicationConfig['APP_PROTOCOL']}#{ApplicationConfig['APP_DOMAIN']}"
+
+    message = <<~MESSAGE.chomp
+      New Article Published: #{title}
+      #{url}#{path}
+    MESSAGE
+
+    SlackBotPingWorker.perform_async(
+      message: message,
+      channel: "activity",
+      username: "article_bot",
+      icon_emoji: ":writing_hand:",
+    )
   end
 end
